@@ -1004,3 +1004,194 @@ class MonadWide(MonadTall):
             self.cmd_swap_right()
         elif self.align == self._down:
             self.cmd_swap_left()
+
+
+class MonadThreeCol(MonadTall):
+    """Emulate the behavior of XMonad's ThreeColumns layout.
+
+    A layout similar to tall but with three columns. With an ultra wide display
+    this layout can be used for a huge main window - ideally at the center of the
+    screen - and up to six reasonable sized secondary windows.
+
+    Main-Pane:
+
+    A main pane that contains a single window takes up a vertical portion of
+    the screen_rect based on the ratio setting. This ratio can be adjusted with
+    the ``cmd_grow_main`` and ``cmd_shrink_main`` or, while the main pane is in
+    focus, ``cmd_grow`` and ``cmd_shrink``. The main pane can also be centered.
+
+    ::
+
+        ---------------------------    ---------------------------
+        |           |      |      |    |      |           |      |
+        |           |      |      |    |      |           |      |
+        |           |      |      |    |      |           |      |
+        |           |      |      |    |      |           |      |
+        |           |      |      |    |      |           |      |
+        |           |      |      |    |      |           |      |
+        ---------------------------    ---------------------------
+
+    Secondary-panes:
+
+    Occupying the rest of the screen_rect are one or more secondary panes.  The
+    secondary panes will be divided into two columns and share the vertical space
+    of each column. However they can be resized at will with the ``cmd_grow`` and
+    ``cmd_shrink`` methods. The other secondary panes will adjust their sizes to
+    smoothly fill all of the space.
+
+    ::
+
+        ---------------------------    ---------------------------
+        |           |      |      |    |           |______|      |
+        |           |______|      |    |           |      |      |
+        |           |      |______|    |           |      |______|
+        |           |______|      |    |           |      |      |
+        |           |      |      |    |           |______|      |
+        |           |      |      |    |           |      |      |
+        ---------------------------    ---------------------------
+
+    Panes can be moved with the ``cmd_shuffle_up`` and ``cmd_shuffle_down``
+    methods. As mentioned the main pane is considered the top of the stack;
+    moving up is counter-clockwise and moving down is clockwise. A secondary
+    pane can also be promoted to the main pane with the ``cmd_swap_main``
+    method.
+
+    Normalizing/Resetting:
+
+    To restore all secondary client windows to their default size ratios
+    use the ``cmd_normalize`` method.
+
+    To reset all client windows to their default sizes, including the primary
+    window, use the ``cmd_reset`` method.
+
+    Maximizing:
+
+    To toggle a client window between its minimum and maximum sizes
+    simply use the ``cmd_maximize`` on a focused client.
+    """
+
+    defaults = [
+        ("main_centered", False, "Place the main pane at the center of the screen"),
+    ]
+
+    def __init__(self, **config):
+        MonadTall.__init__(self, **config)
+        self.add_defaults(MonadThreeCol.defaults)
+
+    def _configure_specific(self, client, screen_rect, border_color, index):
+        clients = self._get_clients_per_column()
+        if index == 0:
+            self._configure_main(client, screen_rect)
+        elif index <= clients[0]:
+            self._configure_left(client, screen_rect, index)
+        else:
+            self._configure_right(client, screen_rect, index)
+
+    def _configure_main(self, client, screen_rect):
+        width = self._get_main_width(screen_rect)
+        height = screen_rect.height
+        left = screen_rect.x
+        top = screen_rect.y
+
+        if self.main_centered and len(self.clients) > 2:
+            left += (screen_rect.width - width) // 2
+
+        self._place_client(client, left, top, width, height)
+
+    def _configure_left(self, client, screen_rect, index):
+        width = self._get_secondary_width(screen_rect)
+        height = self._get_secondary_height(index)
+        left = screen_rect.x
+        top = screen_rect.y + self._get_secondary_heights_above(index)
+
+        if not self.main_centered or len(self.clients) == 2:
+            left += self._get_main_width(screen_rect)
+
+        self._place_client(client, left, top, width, height)
+
+    def _configure_right(self, client, screen_rect, index):
+        width = self._get_secondary_width(screen_rect)
+        height = self._get_secondary_height(index)
+        left = screen_rect.x + width + self._get_main_width(screen_rect)
+        top = screen_rect.y + self._get_secondary_heights_above(index)
+
+        self._place_client(client, left, top, width, height)
+
+    def _get_main_width(self, screen_rect):
+        return int(screen_rect.width * self.ratio)
+
+    def _get_secondary_width(self, screen_rect):
+        width = screen_rect.width - self._get_main_width(screen_rect)
+        if len(self.clients) > 2:
+            width //= 2
+
+        return width
+
+    def _get_secondary_height(self, index):
+        return self._get_absolute_size_from_relative(
+            self.relative_sizes[index - 1]
+        )
+
+    def _get_secondary_heights_above(self, index):
+        clients = self._get_clients_per_column()
+        start = 0 if index <= clients[0] else clients[0]
+        return self._get_absolute_size_from_relative(
+            sum(self.relative_sizes[start:index - 1])
+        )
+
+    def _place_client(self, client, left, top, width, height):
+        client.place(
+            left,
+            top,
+            width - 2 * self.border_width,
+            height - 2 * self.border_width,
+            self.border_width,
+            self.border_focus if client.has_focus else self.border_normal,
+            margin=self.margin,
+            )
+
+    def cmd_normalize(self, redraw=True):
+        clients = self._get_clients_per_column()
+        if self.screen_rect is not None:
+            self.relative_sizes = []
+            if clients[0] > 0:
+                self.relative_sizes += [1.0 / clients[0]] * clients[0]
+            if clients[1] > 0:
+                self.relative_sizes += [1.0 / clients[1]] * clients[1]
+
+        if redraw:
+            self.group.layout_all()
+        self.do_normalize = False
+
+    def cmd_swap_main(self):
+        self.cmd_swap(self.clients.current_client, self.clients[0])
+
+    def _grow_secondary(self, amt):
+        self._resize_secondary(amt)
+
+    def _shrink_secondary(self, amt):
+        self._resize_secondary(-amt)
+
+    def _resize_secondary(self, amt):
+        amt = self._get_relative_size_from_absolute(amt)
+        clients = self._get_clients_per_column()
+        if self.focused <= clients[0]:
+            start = 0
+            end = clients[0]
+            count = clients[0]
+        else:
+            start = clients[0]
+            end = clients[0] + clients[1]
+            count = clients[1]
+
+        for i in range(start, end):
+            if i == self.focused - 1:
+                self.relative_sizes[i] += amt
+            else:
+                self.relative_sizes[i] += -amt / (count - 1)
+
+        self.group.layout_all()
+
+    def _get_clients_per_column(self):
+        clients = len(self.clients) - 1
+        return [clients // 2 + clients % 2, clients // 2]
